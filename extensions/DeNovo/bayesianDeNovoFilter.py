@@ -11,6 +11,7 @@ import logging
 import itertools
 import ast
 from math import log10
+import argparse
 
 ###################################################################################################
 
@@ -41,6 +42,8 @@ logBayesFactorThreshold = log10(1.0)
 #logBayesFactorThreshold = log10(1.0/10.0)
 #logBayesFactorThreshold = log10(1.0/50.0)
 #logBayesFactorThreshold = log10(1.0/4.0)
+
+GQThreshold = 30 # Threshold on genotype quality
 
 ###################################################################################################
 
@@ -255,7 +258,6 @@ def isMendelError(variant, pedigree, sexOfChild):
     NB. The genotype quality threshold was not being applied to non-Platypus calls,
     previously.
     """
-    GQThreshold = 30 # Threshold on genotype quality
 
     childSample = pedigree['Child']
     motherSample = pedigree['Mother']
@@ -282,7 +284,6 @@ def isMendelError(variant, pedigree, sexOfChild):
     # may be haploid. TODO: fix.
     if min(GQChild, GQFather, GQMother) < GQThreshold:
         return False
-
 
     # Genotypes that could be inherited by the child, according to the mendelian
     # pattern. If the observed genotype is not one of these then we have a mendelian
@@ -492,38 +493,69 @@ def passesBayesianFilter(variant, pedigree, sexOfChild):
     #print variant.pos, bayesFactor
 
     if bayesFactor < logBayesFactorThreshold:
-        return True
+        return True, bayesFactor
     else:
-        return False
+        return False, bayesFactor
 
 ###################################################################################################
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("vcf", help="VCF file with variant calls for the trio")
+    parser.add_argument("ped", help="PED file with pedigree information for the trio")
+    parser.add_argument("extension", help="extension (optional)", nargs='?', default="")
+    parser.add_argument("--log-prior-denovo", help="log10 of prior on de novo mutation rate",
+                        default = PRIOR_DENOVO, type = float) # Prior based on 2 de novos per 100MB
+    parser.add_argument("--log-prior-snp", help="log10 of prior on SNP rate",
+                        default = PRIOR_SNP, type = float) # 1 SNP per 1000 bases
+    parser.add_argument("--max-parental-var-frac",
+                        help="maximum fraction of variant-supporting reads in parents",
+                        default = MAX_PARENTAL_VAR_FRAC, type = float)
+    parser.add_argument("--min-child-var-frac",
+                        help="minimum fraction of variant-supporting reads in child",
+                        default = MIN_VAR_FRAC_IN_CHILD, type = float)
+    parser.add_argument("--min-child-reads",
+                        help="minimum number of variant-supporting reads in child",
+                        default = MIN_READS_IN_CHILD, type = int)
+    parser.add_argument("--log-threshold",
+                        help="log10 of Bayes factor threshold",
+                        default = logBayesFactorThreshold, type = float)
+    parser.add_argument("--min-gq",
+                        help="minimum genotype quality, both for the whole variant and per sample",
+                        default = GQThreshold, type = int)
+    args = parser.parse_args()
 
-    if len(sys.argv) < 3:
-        print
-        print "Usage: python bayesianDeNovoFilter.py inVCF pedFile"
-        print
-        raise StandardError, "Not enough arguments"
+    PRIOR_DENOVO = args.log_prior_denovo
+    PRIOR_SNP = args.log_prior_snp
+    PRIOR_NO_DENOVO = log10(1.0 - 10**PRIOR_DENOVO - 10**PRIOR_SNP)
+
+    MAX_PARENTAL_VAR_FRAC = args.max_parental_var_frac
+    MIN_VAR_FRAC_IN_CHILD = args.min_child_var_frac
+    MIN_READS_IN_CHILD = args.min_child_reads
+    logBayesFactorThreshold = args.log_threshold
+    GQThreshold = args.min_gq
+
+    logger.info('Max parental variant fraction: %f', MAX_PARENTAL_VAR_FRAC)
+    logger.info('Min variant fraction in child: %f', MIN_VAR_FRAC_IN_CHILD)
+    logger.info('Min reads in child: %d', MIN_READS_IN_CHILD)
+    logger.info('logBayesFactorThreshold: %f', logBayesFactorThreshold)
+    logger.info('GQ threshold: %d', GQThreshold)
 
     # Input VCF file of Platypus (or other) calls. Can be gzipped or
     # plain text.
-    inVCFName = sys.argv[1]
+    inVCFName = args.vcf
     inVCFFile = None
 
+    logger.info('Using VCF: %s', inVCFName)
     if inVCFName.endswith("gz"):
         inVCFFile = gzip.open(inVCFName, 'r')
     else:
         inVCFFile = open(inVCFName, 'r')
 
-    pedFileName = sys.argv[2] # Name of pedigree file
+    pedFileName = args.ped # Name of pedigree file
+    logger.info('Using PED: %s', pedFileName)
 
-    extension = None
-
-    try:
-        extension = sys.argv[3]
-    except Exception:
-        extension = ""
+    extension = args.extension
 
     # Make output files using the name of the input VCF with various extensions
     outMendelErrorsFileName = inVCFName.split(".")[0] + "_mendelErrors%s.vcf"  %(extension)
@@ -545,10 +577,19 @@ if __name__ == "__main__":
     samples = None # All samples in the VCF
 
     for line in inVCFFile:
-
+        #header lines
         if line.startswith("#"):
-
+            #is this the column specification?
             if not line.startswith("##"):
+                #append our custom info/filters to the header
+                header_lines = ['##INFO=<ID=logBayesFactorDNM,Number=1,Type=Float,Description="log10 of Bayes factor for de novo mutation">\n',
+                                '##FILTER=<ID=DNM,Description="Fails criteria for de novo mutation">\n',
+                                '##FILTER=<ID=bfDNM,Description="Fails log Bayes factor threshold for de novo mutation">\n']
+                for header_line in header_lines:
+                    outMendelErrorFile.write(header_line)
+                    outDeNovoVarsFile.write(header_line)
+                    outFilteredDeNovoVarsFile.write(header_line)
+
                 samples,pedigree,sexOfChild = readPedigreeFromFile(pedFileName, line)
 
             outMendelErrorFile.write(line)
@@ -570,16 +611,39 @@ if __name__ == "__main__":
                 continue
 
             if isMendelError(variant, pedigree, sexOfChild):
-                outMendelErrorFile.write(line + "\n")
-                countMendelError += 1
+                deNovoFilterPass = isDeNovo(variant, pedigree, sexOfChild)
 
-                if isDeNovo(variant, pedigree, sexOfChild):
+                #attach filter flag to the column data
+                if not deNovoFilterPass:
+                    if cols[6] == '.' or cols[6] == 'PASS':
+                        cols[6] = 'DNM'
+                    else:
+                        cols[6] += ';DNM'
+                    #reconstitute tab-separated line from columns
+                    line = "\t".join(cols)
+
+                if deNovoFilterPass:
+                    bayesianFilterPass, logBayesFactor = passesBayesianFilter(variant, pedigree, sexOfChild)
+
+                    #attach information to the column data
+                    cols[7] += ';logBayesFactorDNM=%f' % logBayesFactor
+                    if not bayesianFilterPass:
+                        if cols[6] == '.' or cols[6] == 'PASS':
+                            cols[6] = 'bfDNM'
+                        else:
+                            cols[6] += ';bfDNM'
+                    #reconstitute tab-separated line from columns
+                    line = "\t".join(cols)
+
                     outDeNovoVarsFile.write(line + "\n")
                     countDNM += 1
 
-                    if passesBayesianFilter(variant, pedigree, sexOfChild):
+                    if bayesianFilterPass:
                         outFilteredDeNovoVarsFile.write(line + "\n")
                         countDNMBayes += 1
+
+                outMendelErrorFile.write(line + "\n")
+                countMendelError += 1
 
     # Print summary
     print "Input VCF was %s. Found %s mendel errors, %s de novos (%s passing the bayesian filter)" %(inVCFName, countMendelError, countDNM, countDNMBayes)

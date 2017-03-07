@@ -992,6 +992,8 @@ def getRegions(options):
                             start = int(cols[1])
                             end = int(cols[2])
                             regions.append( (chrom,start,end) )
+                        else:
+                            raise Exception('Invalid line format') #explicitly raise Exception to generate warning message
                     except Exception:
                         logger.debug("Could not parse line in regions file (%s). Skipping..." %(options.regions[0]))
                         logger.debug("Line was %s" %(line))

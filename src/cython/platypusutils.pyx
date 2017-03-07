@@ -987,10 +987,11 @@ def getRegions(options):
                 for line in theFile:
                     try:
                         cols = line.split("\t")
-                        chrom = cols[0]
-                        start = int(cols[1])
-                        end = int(cols[2])
-                        regions.append( (chrom,start,end) )
+                        if len(cols) >= 3:
+                            chrom = cols[0]
+                            start = int(cols[1])
+                            end = int(cols[2])
+                            regions.append( (chrom,start,end) )
                     except Exception:
                         logger.debug("Could not parse line in regions file (%s). Skipping..." %(options.regions[0]))
                         logger.debug("Line was %s" %(line))
